@@ -208,7 +208,7 @@ class ProviderSection(QFrame):
         label = QLabel(provider_name)
         label.setStyleSheet(
             """
-            font-family: "sans-serif";
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
             font-weight: 700;
             font-size: 13px;
             color: black;

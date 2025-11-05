@@ -996,7 +996,7 @@ class ModelManager(QObject):
                 model_config["model"] = DocLayoutYOLO(
                     model_config, on_message=self.new_model_status.emit
                 )
-                self.auto_segmentation_model_unselected.emit()
+                self.auto_segmentation_model_selected.emit()
                 logger.info(
                     f"✅ Model loaded successfully: {model_config['type']}"
                 )
@@ -1009,6 +1009,30 @@ class ModelManager(QObject):
                 error_text = translated_template.format(error_message=str(e))
                 self.new_model_status.emit(error_text)
                 return
+            # Request next files for prediction
+            self.request_next_files_requested.emit()
+        elif model_config["type"] == "qwen_vl":
+            from .qwen_vl import QwenVL
+
+            try:
+                model_config["model"] = QwenVL(
+                    model_config, on_message=self.new_model_status.emit
+                )
+                self.auto_segmentation_model_selected.emit()
+                logger.info(
+                    f"✅ Model loaded successfully: {model_config['type']}"
+                )
+            except Exception as e:  # noqa
+                logger.error(
+                    f"❌ Error in loading model: {model_config['type']} with error: {str(e)}"
+                )
+                template = "Error in loading model: {error_message}"
+                translated_template = self.tr(template)
+                error_text = translated_template.format(error_message=str(e))
+                self.new_model_status.emit(error_text)
+                return
+            # Request next files for prediction
+            self.request_next_files_requested.emit()
         elif model_config["type"] == "yolov5_obb":
             from .yolov5_obb import YOLOv5OBB
 

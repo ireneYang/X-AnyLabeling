@@ -1,0 +1,10 @@
+type: qwen_vl
+name: qwen3_vl_8b_instruct-r20250405
+provider: Tongyi Lab
+display_name: Qwen3-VL-8B-Instruct
+model_path: /Users/ireneyang/swtool/models/Qwen3-VL-8B-Instruct  # model_id or local path
+trust_remote_code: true
+max_new_tokens: 200
+do_sample: false
+num_beams: 1
+device: mps
