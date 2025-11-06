@@ -178,6 +178,10 @@ weights/
 *_imx_model/
 pnnx*
 *.rknn
+*.vscode/
+*.flake8
+myenv/
+tests/
 
 # calibration image
 calibration_*.npy
