@@ -51,7 +51,7 @@ class DeviceManager:
 
     def _auto_detect(self) -> str:
         if self._is_gpu_available():
-            logger.info("GPU detected and available, using GPU")
+            logger.info("GPU (CUDA or CoreML) detected and available, using GPU")
             self._preferred_device = "GPU"
             return "GPU"
 
@@ -69,7 +69,15 @@ class DeviceManager:
                 logger.debug(f"Failed to get ONNX providers: {e}")
                 self._available_providers = []
 
-        return "CUDAExecutionProvider" in self._available_providers
+        # Check for any GPU provider including CUDA for NVIDIA and CoreML for Apple Silicon
+        has_gpu_provider = "CUDAExecutionProvider" in self._available_providers or \
+                          "CoreMLExecutionProvider" in self._available_providers
+        
+        if has_gpu_provider:
+            provider = "CUDA" if "CUDAExecutionProvider" in self._available_providers else "CoreML"
+            logger.debug(f"{provider} execution provider available")
+            
+        return has_gpu_provider
 
     def _load_from_config(self) -> Optional[str]:
         try:

@@ -16,7 +16,11 @@ class OnnxBaseModel:
 
         self.providers = ["CPUExecutionProvider"]
         if device_type.lower() == "gpu":
-            self.providers = ["CUDAExecutionProvider"]
+            # For Apple Silicon, use CoreMLExecutionProvider if available
+            if "CoreMLExecutionProvider" in ort.get_available_providers():
+                self.providers = ["CoreMLExecutionProvider"]
+            else:
+                self.providers = ["CUDAExecutionProvider"]
 
         self.ort_session = ort.InferenceSession(
             model_path,

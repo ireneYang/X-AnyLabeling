@@ -41,8 +41,18 @@ class SamEncoder:
         # Pop TensorRT Runtime due to crashing issues
         # TODO: Add back when TensorRT backend is stable
         providers = [p for p in providers if p != "TensorrtExecutionProvider"]
+        
+        from anylabeling.app_info import __preferred_device__
+        
+        # For Apple Silicon, prioritize CoreMLExecutionProvider
+        if __preferred_device__ == "GPU" and "CoreMLExecutionProvider" in providers:
+            session_providers = ["CoreMLExecutionProvider"]
+        elif __preferred_device__ == "GPU":
+            session_providers = ["CUDAExecutionProvider"]
+        else:
+            session_providers = ["CPUExecutionProvider"]
 
-        self.session = ort.InferenceSession(model_path, providers=providers)
+        self.session = ort.InferenceSession(model_path, providers=session_providers)
 
         self.input_name = self.session.get_inputs()[0].name
         self.input_shape = self.session.get_inputs()[0].shape

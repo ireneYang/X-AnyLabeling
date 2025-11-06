@@ -25,12 +25,25 @@ class SegmentAnythingONNX:
             p for p in self.providers if p != "TensorrtExecutionProvider"
         ]
 
+        from anylabeling.app_info import __preferred_device__
+        
+        # For Apple Silicon, prioritize CoreMLExecutionProvider
+        if __preferred_device__ == "GPU" and "CoreMLExecutionProvider" in self.providers:
+            encoder_providers = ["CoreMLExecutionProvider"]
+            decoder_providers = ["CoreMLExecutionProvider"]
+        elif __preferred_device__ == "GPU":
+            encoder_providers = ["CUDAExecutionProvider"]
+            decoder_providers = ["CUDAExecutionProvider"]
+        else:
+            encoder_providers = ["CPUExecutionProvider"]
+            decoder_providers = ["CPUExecutionProvider"]
+
         self.encoder_session = onnxruntime.InferenceSession(
-            encoder_model_path, providers=self.providers
+            encoder_model_path, providers=encoder_providers
         )
         self.encoder_input_name = self.encoder_session.get_inputs()[0].name
         self.decoder_session = onnxruntime.InferenceSession(
-            decoder_model_path, providers=self.providers
+            decoder_model_path, providers=decoder_providers
         )
 
     def get_input_points(self, prompt):

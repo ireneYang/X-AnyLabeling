@@ -47,15 +47,27 @@ class SegmentAnythingONNX:
 
         sess_options = onnxruntime.SessionOptions()
         sess_options.log_severity_level = 3
+        
+        # For Apple Silicon, prioritize CoreMLExecutionProvider
+        if __preferred_device__ == "GPU" and "CoreMLExecutionProvider" in self.providers:
+            encoder_providers = ["CoreMLExecutionProvider"]
+            decoder_providers = ["CoreMLExecutionProvider"]
+        elif __preferred_device__ == "GPU":
+            encoder_providers = ["CUDAExecutionProvider"]
+            decoder_providers = ["CUDAExecutionProvider"]
+        else:
+            encoder_providers = ["CPUExecutionProvider"]
+            decoder_providers = ["CPUExecutionProvider"]
+
         self.encoder_session = onnxruntime.InferenceSession(
             encoder_model_path,
-            providers=self.providers,
+            providers=encoder_providers,
             sess_options=sess_options,
         )
         self.encoder_input_name = self.encoder_session.get_inputs()[0].name
         self.decoder_session = onnxruntime.InferenceSession(
             decoder_model_path,
-            providers=self.providers,
+            providers=decoder_providers,
             sess_options=sess_options,
         )
 

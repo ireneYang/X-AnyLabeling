@@ -37,12 +37,23 @@ class SegmentAnythingONNX:
         # Pop TensorRT Runtime due to crashing issues
         # TODO: Add back when TensorRT backend is stable
         providers = [p for p in providers if p != "TensorrtExecutionProvider"]
+        
+        # For Apple Silicon, prioritize CoreMLExecutionProvider
+        if __preferred_device__ == "GPU" and "CoreMLExecutionProvider" in providers:
+            encoder_providers = ["CoreMLExecutionProvider"]
+            decoder_providers = ["CoreMLExecutionProvider"]
+        elif __preferred_device__ == "GPU":
+            encoder_providers = ["CUDAExecutionProvider"]
+            decoder_providers = ["CUDAExecutionProvider"]
+        else:
+            encoder_providers = ["CPUExecutionProvider"]
+            decoder_providers = ["CPUExecutionProvider"]
 
         self.encoder_session = ort.InferenceSession(
-            encoder_model_path, providers=providers
+            encoder_model_path, providers=encoder_providers
         )
         self.decoder_session = ort.InferenceSession(
-            decoder_model_path, providers=providers
+            decoder_model_path, providers=decoder_providers
         )
 
         self.encoder_input_name = self.encoder_session.get_inputs()[0].name
