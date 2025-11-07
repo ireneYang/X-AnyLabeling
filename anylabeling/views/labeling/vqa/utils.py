@@ -52,7 +52,7 @@ class AIWorkerThread(QThread):
             settings = models_config.get("settings", {})
             provider = settings.get("provider")
             model_id = settings.get("model_id")
-            max_tokens = settings.get("max_length", 2048)
+            max_tokens = settings.get("max_length", 4096)  # Increase default value
             temperature = settings.get("temperature", 0.7)
             system_prompt = settings.get("system_prompt", None)
 

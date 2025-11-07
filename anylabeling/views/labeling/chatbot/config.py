@@ -27,6 +27,7 @@ MIN_MSG_INPUT_HEIGHT = 20
 MAX_MSG_INPUT_HEIGHT = 300
 USER_MESSAGE_MAX_WIDTH_PERCENT = 70
 REFRESH_INTERVAL = 300  # seconds
+DEFAULT_MAX_TOKENS = 4096  # Increase default max tokens to prevent truncation
 
 # Theme configuration
 THEME = {

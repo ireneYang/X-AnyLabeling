@@ -707,6 +707,9 @@ class ChatbotDialog(QDialog):
         self.max_length_input.setFixedHeight(40)
         if _model_settings["max_length"]:
             self.max_length_input.setValue(_model_settings["max_length"])
+        else:
+            # Set a higher default value to prevent truncation
+            self.max_length_input.setValue(4096)
         model_params_layout.addWidget(self.max_length_input)
 
         # Add stretch to push everything to the top
