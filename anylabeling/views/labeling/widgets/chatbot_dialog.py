@@ -2,6 +2,7 @@ import base64
 import datetime
 import json
 import os
+import os.path as osp
 import re
 import shutil
 import threading
@@ -1246,6 +1247,8 @@ class ChatbotDialog(QDialog):
         # Stop the loading timer if it's still active
         if self.loading_timer and self.loading_timer.isActive():
             self.loading_timer.stop()
+        
+        logger.info(f"====!!!Stream finished with success====: {success}")
 
         if success and self.loading_message:
             # Get the final text
@@ -1275,16 +1278,212 @@ class ChatbotDialog(QDialog):
             loading_message_to_remove.setParent(None)
             loading_message_to_remove.deleteLater()
 
+            logger.info("=====Assistant message added to chat history====")  
             # Set dirty flag
             if self.parent().filename:
                 self.parent().set_dirty()
-
+                logger.info("=====Chat set_dirty saved====")
+                # Save chat history with "chatbot_" prefix
+                self.save_chat_history_with_prefix()
+                logger.info("=====Chat history saved with prefix====")
+                # Automatically generate XLABEL format file from assistant response
+                self.generate_xlabel_from_assistant_response(final_text)
+                logger.info("=====XLABEL generation attempted====")
+                
+    
         # Reset streaming state
         self.streaming = False
         self.set_components_enabled(True)
 
         # Auto focus on message input after generation
         self.message_input.setFocus()
+        
+    def extract_and_save_labeling_result(self, assistant_content, image_file):
+        """
+        Extract bounding box information from assistant content and save as XLabel format
+        """
+        try:
+            # Import required modules
+            from anylabeling.views.labeling.label_converter import LabelConverter
+            import os.path as osp
+            
+            logger.info(f"Attempting to extract bounding box data from assistant content. Content length: {len(assistant_content)}")
+            
+            # Try to parse as Qwen3-VL-Thinking format first
+            bbox_data = LabelConverter().extract_qwen3_vl_thinking_answer(assistant_content)
+            logger.info(f"Qwen3-VL-Thinking format extraction result: {len(bbox_data)} boxes found")
+            
+            # If that fails, try to parse as standard JSON format
+            if not bbox_data:
+                bbox_data = LabelConverter().extract_bbox_answer(assistant_content)
+                logger.info(f"Standard JSON format extraction result: {len(bbox_data)} boxes found")
+            
+            # Try to parse as direct JSON object format (for nested JSON structures)
+            if not bbox_data:
+                try:
+                    import json
+                    import re
+                    # Look for JSON objects in the content
+                    json_patterns = [
+                        r'```(?:json)?\s*({.*?})\s*```',  # Code blocks with or without json specifier
+                        r'<output>\s*({.*?})\s*</output>',  # Output tags
+                        r'<answer>\s*({.*?})\s*</answer>',  # Answer tags
+                        r'({.*?"bbox_2d".*?})'  # Direct JSON with bbox_2d field
+                    ]
+                    
+                    for pattern in json_patterns:
+                        matches = re.findall(pattern, assistant_content, re.DOTALL)
+                        for match in matches:
+                            try:
+                                # Try to parse the matched content as JSON
+                                data = json.loads(match)
+                                if isinstance(data, list):
+                                    bbox_data = data
+                                    logger.info(f"Direct JSON list format extraction result: {len(bbox_data)} boxes found")
+                                    break
+                                elif isinstance(data, dict) and "bbox_2d" in data:
+                                    bbox_data = [data]
+                                    logger.info(f"Direct JSON object format extraction result: {len(bbox_data)} boxes found")
+                                    break
+                            except json.JSONDecodeError:
+                                continue
+                        if bbox_data:
+                            break
+                except Exception as e:
+                    logger.error(f"Error during direct JSON parsing: {str(e)}")
+            
+            # If we have bbox data, convert to XLabel format and save
+            if bbox_data:
+                logger.info(f"Successfully extracted {len(bbox_data)} bounding boxes")
+                # Generate label file path with chatbot_ prefix
+                base_filename = osp.splitext(osp.basename(image_file))[0]
+                label_file = f"chatbot_{base_filename}.json"
+                if self.parent().output_dir:
+                    label_file = osp.join(self.parent().output_dir, label_file)
+                else:
+                    label_file = osp.join(osp.dirname(image_file), label_file)
+                
+                logger.info(f"Saving labeling result to: {label_file}")
+                
+                # Create converter and convert
+                converter = LabelConverter()
+                converter.vlm_r1_ovd_to_custom(
+                    input_data=assistant_content,
+                    output_file=label_file,
+                    image_file=image_file
+                )
+                
+                # Use a QTimer to delay the file loading to avoid modal session conflicts
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(100, lambda: self.parent().load_file(image_file))
+            else:
+                logger.warning("No bounding box data found in assistant content")
+                
+        except Exception as e:
+            # Log error but don't interrupt the chat flow
+            logger.error(f"Error extracting labeling result: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def generate_xlabel_from_assistant_response(self, assistant_response):
+        """
+        Generate XLABEL format file from assistant response automatically
+        """
+        try:
+            import json
+            import re
+            import os.path as osp
+            
+            # 正则表达式匹配代码块
+            code_block_pattern = r'```(?:json)?\s*(.*?)\s*```'
+            
+            # 查找所有代码块
+            matches = re.findall(code_block_pattern, assistant_response, re.DOTALL)
+            
+            if not matches:
+                logger.info("No JSON code block found in assistant response")
+                return
+                
+            # 解析第一个有效的JSON代码块
+            bbox_data = None
+            for match in matches:
+                try:
+                    bbox_data = json.loads(match)
+                    break
+                except json.JSONDecodeError:
+                    continue
+                    
+            if not bbox_data:
+                logger.error("Failed to parse JSON from assistant response")
+                return
+            
+            # 构建 XLABEL 格式
+            image_filename = osp.basename(self.parent().filename)
+            xlabel_data = {
+                "version": "4.0",
+                "flags": {},
+                "description": "",
+                "shapes": [],
+                "imagePath": image_filename,
+                "imageData": None
+            }
+            
+            # 获取图像实际尺寸
+            pixmap = QPixmap(self.parent().filename)
+            if not pixmap.isNull():
+                image_width = pixmap.width()
+                image_height = pixmap.height()
+            else:
+                # 默认尺寸
+                image_width = 1024
+                image_height = 538
+            
+            # 添加边界框到 shapes
+            for item in bbox_data:
+                if isinstance(item, dict) and "bbox_2d" in item and "label" in item:
+                    x1, y1, x2, y2 = item["bbox_2d"]
+                    
+                    # 确保坐标在有效范围内
+                    x1 = max(0, min(x1, image_width))
+                    y1 = max(0, min(y1, image_height))
+                    x2 = max(0, min(x2, image_width))
+                    y2 = max(0, min(y2, image_height))
+                    
+                    label = item["label"]
+                    
+                    # 创建矩形框的四个点（左上、右上、右下、左下）
+                    shape = {
+                        "label": label,
+                        "points": [
+                            [x1, y1],  # 左上
+                            [x2, y1],  # 右上
+                            [x2, y2],  # 右下
+                            [x1, y2]   # 左下
+                        ],
+                        "shape_type": "rectangle",
+                        "line_color": None,
+                        "fill_color": None,
+                        "group_id": None,
+                        "source": "manual",
+                        "attributes": {}
+                    }
+                    xlabel_data["shapes"].append(shape)
+            
+            # 设置正确的图像尺寸
+            xlabel_data["imageWidth"] = image_width
+            xlabel_data["imageHeight"] = image_height
+            
+            # 保存为 XLABEL 文件，与图像同目录
+            output_dir = osp.dirname(self.parent().filename) if not self.parent().output_dir else self.parent().output_dir
+            output_file = osp.join(output_dir, f"{osp.splitext(image_filename)[0]}.json")
+            
+            with open(output_file, 'w', encoding='utf-8') as out_f:
+                json.dump(xlabel_data, out_f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"XLABEL file generated: {output_file}")
+            
+        except Exception as e:
+            logger.error(f"Error generating XLABEL from assistant response: {str(e)}")
 
     def handle_loading_state(self, is_loading):
         """Handle loading state changes"""
@@ -1363,6 +1562,558 @@ class ChatbotDialog(QDialog):
         except Exception as e:
             logger.error(f"Error loading chat for current image: {e}")
 
+    def save_chat_history_with_prefix(self):
+        """Save chat history with 'chatbot_' prefix"""
+        logger.info("====Saving chat history with 'chatbot_' prefix...====")
+        try:
+            # Get current image filename without extension
+            image_filename = osp.basename(self.parent().filename)
+            base_filename = osp.splitext(image_filename)[0]
+            
+            # Create chatbot filename with prefix
+            chatbot_filename = f"chatbot_{base_filename}.json"
+            
+            # Determine save path
+            if self.parent().output_dir:
+                chatbot_filepath = osp.join(self.parent().output_dir, chatbot_filename)
+            else:
+                chatbot_filepath = osp.join(osp.dirname(self.parent().filename), chatbot_filename)
+            
+            # Load existing label file data
+            label_file_data = {}
+            
+            # Instead of using parent().get_label_file(), we directly use the chatbot file path
+            # to avoid creating the non-prefixed file
+            if osp.exists(chatbot_filepath):
+                with open(chatbot_filepath, 'r', encoding='utf-8') as f:
+                    label_file_data = json.load(f)
+            
+            # Update chat history in the data
+            label_file_data["chat_history"] = self.parent().other_data.get("chat_history", [])
+            
+            # Save to chatbot prefixed file
+            with open(chatbot_filepath, 'w', encoding='utf-8') as f:
+                json.dump(label_file_data, f, ensure_ascii=False, indent=2)
+                
+            # # Automatically generate VLM-R1-OVD format file
+            # self.generate_vlm_r1_ovd_from_chat_history(label_file_data, base_filename)
+                
+        except Exception as e:
+            logger.error(f"Error saving chat history with prefix: {e}")
+
+    def generate_vlm_r1_ovd_file(self, assistant_content, image_file):
+        """
+        Generate VLM-R1-OVD format file from assistant content automatically
+        """
+        try:
+            import os
+            import json
+            from anylabeling.views.labeling.label_converter import LabelConverter
+            
+            # Get the base name of the image file
+            base_name = os.path.splitext(os.path.basename(image_file))[0]
+            
+            # Determine output directory
+            output_dir = self.parent().output_dir if self.parent().output_dir else os.path.dirname(image_file)
+            
+            # Create VLM-R1-OVD entry
+            vlm_r1_ovd_entry = {
+                "id": 1,  # We'll use 1 as default ID for single entry
+                "image": os.path.basename(image_file),
+                "conversations": [
+                    {
+                        "from": "assistant",
+                        "value": assistant_content
+                    }
+                ]
+            }
+            
+            # Generate VLM-R1-OVD filename with "VLM_R1_OVD_" prefix
+            vlm_r1_ovd_filename = f"VLM_R1_OVD_{base_name}.jsonl"
+            vlm_r1_ovd_file_path = os.path.join(output_dir, vlm_r1_ovd_filename)
+            
+            # Save to file
+            with open(vlm_r1_ovd_file_path, 'w', encoding='utf-8') as f:
+                f.write(json.dumps(vlm_r1_ovd_entry, ensure_ascii=False) + '\n')
+            
+            logger.info(f"VLM-R1-OVD file saved: {vlm_r1_ovd_file_path}")
+            
+            # Convert the VLM-R1-OVD entry to XLABEL format for visualization
+            self._convert_vlm_r1_ovd_entry_to_xlabel(vlm_r1_ovd_entry, output_dir)
+            
+            # Also convert using the new general method
+            self._convert_vlm_r1_ovd_to_xlabel(vlm_r1_ovd_file_path, output_dir)
+            
+        except Exception as e:
+            logger.error(f"Error generating VLM-R1-OVD file: {str(e)}")
+
+    def generate_vlm_r1_ovd_from_chat_history(self, label_file_data, base_filename):
+        """
+        Generate VLM-R1-OVD format file from chat history automatically
+        """
+        try:
+            import json
+            
+            # Determine output directory
+            output_dir = self.parent().output_dir if self.parent().output_dir else osp.dirname(self.parent().filename)
+            
+            # Extract chat history
+            chat_history = label_file_data.get("chat_history", [])
+            
+            if not chat_history:
+                logger.info("No chat history found")
+                return
+            
+            # Generate VLM-R1-OVD filename with folder name prefix
+            folder_name = osp.basename(output_dir) if output_dir else "default"
+            vlm_r1_ovd_filename = f"VLM_R1_OVD_{folder_name}.jsonl"
+            vlm_r1_ovd_file_path = osp.join(output_dir, vlm_r1_ovd_filename)
+            
+            # Create conversation format for VLM-R1-OVD
+            conversations = []
+            for msg in chat_history:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                
+                # Map roles to VLM-R1-OVD format
+                if role == "user":
+                    from_role = "human"
+                elif role == "assistant":
+                    from_role = "assistant"
+                else:
+                    from_role = role
+                    
+                conversations.append({
+                    "from": from_role,
+                    "value": content
+                })
+            
+            # Create VLM-R1-OVD entry
+            entry = {
+                "id": 1,  # Default ID, will be updated when writing to file
+                "image": osp.basename(self.parent().filename),
+                "conversations": conversations
+            }
+            
+            # Read existing entries
+            existing_entries = []
+            if osp.exists(vlm_r1_ovd_file_path):
+                try:
+                    with open(vlm_r1_ovd_file_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            if line.strip():
+                                existing_entries.append(json.loads(line.strip()))
+                except Exception as e:
+                    logger.warning(f"Could not read existing VLM-R1-OVD file: {e}")
+            
+            # Check if an entry for this image already exists
+            image_name = osp.basename(self.parent().filename)
+            entry_found = False
+            for i, existing_entry in enumerate(existing_entries):
+                if existing_entry.get("image") == image_name:
+                    # Update existing entry
+                    existing_entries[i] = entry
+                    entry_found = True
+                    break
+            
+            # If not found, add as new entry
+            if not entry_found:
+                existing_entries.append(entry)
+            
+            # Write all entries back to file
+            with open(vlm_r1_ovd_file_path, 'w', encoding='utf-8') as f:
+                for entry in existing_entries:
+                    f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+            
+            logger.info(f"VLM-R1-OVD file updated: {vlm_r1_ovd_file_path}")
+            
+            # Convert VLM-R1-OVD to XLABEL format automatically
+            self._convert_vlm_r1_ovd_to_xlabel(vlm_r1_ovd_file_path, output_dir)
+            
+        except Exception as e:
+            logger.error(f"Error generating VLM-R1-OVD from chat history: {str(e)}")
+
+    def _convert_vlm_r1_ovd_entry_to_xlabel(self, entry, output_dir):
+        """
+        Convert a single VLM-R1-OVD entry to XLABEL format for visualization
+        """
+        try:
+            from anylabeling.views.labeling.label_converter import LabelConverter
+            import json
+            import re
+            
+            # Get image file path
+            image_filename = entry.get("image", "")
+            if not image_filename:
+                logger.warning("No image filename found in VLM-R1-OVD entry")
+                return
+                
+            # Find the full image path
+            image_file = None
+            if self.parent().filename and osp.basename(self.parent().filename) == image_filename:
+                image_file = self.parent().filename
+            else:
+                # Try to find the image in the image list
+                for img_path in self.parent().image_list:
+                    if osp.basename(img_path) == image_filename:
+                        image_file = img_path
+                        break
+            
+            if not image_file or not osp.exists(image_file):
+                # Try to construct path relative to output directory
+                image_file = osp.join(output_dir, image_filename)
+                if not osp.exists(image_file):
+                    logger.warning(f"Image file not found: {image_file}")
+                    return
+            
+            # Extract assistant content from conversations
+            conversations = entry.get("conversations", [])
+            assistant_content = ""
+            for conv in conversations:
+                if conv.get("from") == "assistant":
+                    assistant_content = conv.get("value", "")
+                    break
+            
+            if not assistant_content:
+                logger.warning(f"No assistant content found for image {image_filename}")
+                return
+            
+            # Extract bounding box data using the general method
+            bbox_data = self._extract_bbox_data(assistant_content)
+            
+            if not bbox_data:
+                logger.warning(f"No bounding box data extracted for image {image_filename}")
+                return
+            
+            # Create label converter
+            converter = LabelConverter()
+            
+            # Generate XLABEL filename
+            xlabel_filename = osp.splitext(image_filename)[0] + ".json"
+            xlabel_file_path = osp.join(output_dir, xlabel_filename)
+            
+            # Get image dimensions
+            image_width, image_height = converter.get_image_size(image_file)
+            if image_width == 0 or image_height == 0:
+                # Use default dimensions if we can't get the real ones
+                image_width, image_height = 1024, 538
+            
+            # Convert to XLABEL format
+            shapes = []
+            for item in bbox_data:
+                label = item.get("label", "object")
+                bbox = item.get("bbox_2d", [])
+                
+                if len(bbox) != 4:
+                    continue
+                    
+                # Convert normalized coordinates to pixel coordinates if needed
+                if all(0 <= coord <= 1 for coord in bbox):
+                    # Normalized coordinates
+                    x1 = bbox[0] * image_width
+                    y1 = bbox[1] * image_height
+                    x2 = bbox[2] * image_width
+                    y2 = bbox[3] * image_height
+                else:
+                    # Pixel coordinates
+                    x1, y1, x2, y2 = bbox
+                
+                # Ensure coordinates are within image bounds
+                x1 = max(0, min(image_width, x1))
+                y1 = max(0, min(image_height, y1))
+                x2 = max(0, min(image_width, x2))
+                y2 = max(0, min(image_height, y2))
+                
+                # Create rectangle points (top-left, top-right, bottom-right, bottom-left)
+                points = [
+                    [x1, y1],
+                    [x2, y1],
+                    [x2, y2],
+                    [x1, y2]
+                ]
+                
+                shape = {
+                    "label": label,
+                    "text": "",
+                    "points": points,
+                    "group_id": None,
+                    "shape_type": "rectangle",
+                    "flags": {},
+                    "direction": 0,  # Add direction field
+                }
+                
+                shapes.append(shape)
+            
+            # Create XLABEL format data
+            xlabel_data = {
+                "version": "1.0",
+                "flags": {},
+                "shapes": shapes,
+                "imagePath": image_filename,
+                "imageData": None,
+                "imageHeight": image_height,
+                "imageWidth": image_width
+            }
+            
+            # Write to file
+            with open(xlabel_file_path, "w", encoding="utf-8") as f:
+                json.dump(xlabel_data, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"XLABEL file generated: {xlabel_file_path}")
+            
+        except Exception as e:
+            logger.error(f"Error converting VLM-R1-OVD entry to XLABEL: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _convert_vlm_r1_ovd_to_xlabel(self, vlm_r1_ovd_file_path, output_dir):
+        """
+        Convert VLM-R1-OVD format file to XLABEL format for visualization
+        
+        Args:
+            vlm_r1_ovd_file_path (str): Path to VLM-R1-OVD JSONL file
+            output_dir (str): Output directory for XLABEL files
+        """
+        try:
+            from anylabeling.views.labeling.label_converter import LabelConverter
+            import json
+            import re
+            
+            # Read VLM-R1-OVD file
+            with open(vlm_r1_ovd_file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                        
+                    try:
+                        entry = json.loads(line.strip())
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Could not parse JSON line in {vlm_r1_ovd_file_path}: {e}")
+                        continue
+                    
+                    # Get image file path
+                    image_filename = entry.get("image", "")
+                    if not image_filename:
+                        logger.warning("No image filename found in VLM-R1-OVD entry")
+                        continue
+                        
+                    # Find the full image path
+                    image_file = None
+                    if self.parent().filename and osp.basename(self.parent().filename) == image_filename:
+                        image_file = self.parent().filename
+                    else:
+                        # Try to find the image in the image list
+                        for img_path in self.parent().image_list:
+                            if osp.basename(img_path) == image_filename:
+                                image_file = img_path
+                                break
+                    
+                    if not image_file or not osp.exists(image_file):
+                        # Try to construct path relative to output directory
+                        image_file = osp.join(output_dir, image_filename)
+                        if not osp.exists(image_file):
+                            logger.warning(f"Image file not found: {image_file}")
+                            continue
+                    
+                    # Extract assistant content from conversations
+                    conversations = entry.get("conversations", [])
+                    assistant_content = ""
+                    for conv in conversations:
+                        if conv.get("from") == "assistant":
+                            assistant_content = conv.get("value", "")
+                            break
+                    
+                    if not assistant_content:
+                        logger.warning(f"No assistant content found for image {image_filename}")
+                        continue
+                    
+                    # Extract bounding box data using the general method
+                    bbox_data = self._extract_bbox_data(assistant_content)
+                    
+                    if not bbox_data:
+                        logger.warning(f"No bounding box data extracted for image {image_filename}")
+                        continue
+                    
+                    # Create label converter
+                    converter = LabelConverter()
+                    
+                    # Generate XLABEL filename
+                    xlabel_filename = osp.splitext(image_filename)[0] + ".json"
+                    xlabel_file_path = osp.join(output_dir, xlabel_filename)
+                    
+                    # Get image dimensions
+                    image_width, image_height = converter.get_image_size(image_file)
+                    if image_width == 0 or image_height == 0:
+                        # Use default dimensions if we can't get the real ones
+                        image_width, image_height = 1024, 538
+                    
+                    # Convert to XLABEL format
+                    shapes = []
+                    for item in bbox_data:
+                        label = item.get("label", "object")
+                        bbox = item.get("bbox_2d", [])
+                        
+                        if len(bbox) != 4:
+                            continue
+                            
+                        # Convert normalized coordinates to pixel coordinates if needed
+                        if all(0 <= coord <= 1 for coord in bbox):
+                            # Normalized coordinates
+                            x1 = bbox[0] * image_width
+                            y1 = bbox[1] * image_height
+                            x2 = bbox[2] * image_width
+                            y2 = bbox[3] * image_height
+                        else:
+                            # Pixel coordinates
+                            x1, y1, x2, y2 = bbox
+                        
+                        # Ensure coordinates are within image bounds
+                        x1 = max(0, min(image_width, x1))
+                        y1 = max(0, min(image_height, y1))
+                        x2 = max(0, min(image_width, x2))
+                        y2 = max(0, min(image_height, y2))
+                        
+                        # Create rectangle points (top-left, top-right, bottom-right, bottom-left)
+                        points = [
+                            [x1, y1],
+                            [x2, y1],
+                            [x2, y2],
+                            [x1, y2]
+                        ]
+                        
+                        shape = {
+                            "label": label,
+                            "text": "",
+                            "points": points,
+                            "group_id": None,
+                            "shape_type": "rectangle",
+                            "flags": {},
+                            "direction": 0,
+                        }
+                        
+                        shapes.append(shape)
+                    
+                    # Create XLABEL format data
+                    xlabel_data = {
+                        "version": "1.0",
+                        "flags": {},
+                        "shapes": shapes,
+                        "imagePath": image_filename,
+                        "imageData": None,
+                        "imageHeight": image_height,
+                        "imageWidth": image_width
+                    }
+                    
+                    # Write to file
+                    with open(xlabel_file_path, "w", encoding="utf-8") as f:
+                        json.dump(xlabel_data, f, indent=2, ensure_ascii=False)
+                    
+                    logger.info(f"XLABEL file generated: {xlabel_file_path}")
+                    
+        except Exception as e:
+            logger.error(f"Error converting VLM-R1-OVD to XLABEL: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+    def _extract_bbox_data(self, assistant_content):
+        """
+        从assistant的回复中提取边界框数据
+        
+        Args:
+            assistant_content (str): assistant的回复内容
+            
+        Returns:
+            list: 包含边界框信息的字典列表
+        """
+        bbox_data = []
+        
+        # 方法1: 尝试直接解析整个内容为JSON
+        try:
+            data = json.loads(assistant_content)
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and "bbox_2d" in item and "label" in item:
+                        bbox_data.append(item)
+            elif isinstance(data, dict) and "bbox_2d" in data and "label" in data:
+                bbox_data.append(data)
+        except json.JSONDecodeError:
+            pass
+        
+        # 方法2: 尝试提取代码块中的JSON
+        if not bbox_data:
+            code_block_pattern = r'```(?:\w+)?\s*(.*?)\s*```'
+            code_blocks = re.findall(code_block_pattern, assistant_content, re.DOTALL)
+            for block in code_blocks:
+                try:
+                    data = json.loads(block)
+                    if isinstance(data, list):
+                        for item in data:
+                            if isinstance(item, dict) and "bbox_2d" in item and "label" in item:
+                                bbox_data.append(item)
+                    elif isinstance(data, dict) and "bbox_2d" in data and "label" in data:
+                        bbox_data.append(data)
+                    break  # 找到第一个有效的代码块就停止
+                except json.JSONDecodeError:
+                    continue
+        
+        # 方法3: 尝试提取<answer>标签中的内容
+        if not bbox_data:
+            answer_pattern = r'<answer>(.*?)</answer>'
+            answer_matches = re.findall(answer_pattern, assistant_content, re.DOTALL)
+            for match in answer_matches:
+                try:
+                    data = json.loads(match)
+                    if isinstance(data, list):
+                        for item in data:
+                            if isinstance(item, dict) and "bbox_2d" in item and "label" in item:
+                                bbox_data.append(item)
+                    elif isinstance(data, dict) and "bbox_2d" in data and "label" in data:
+                        bbox_data.append(data)
+                    break  # 找到第一个有效的answer就停止
+                except json.JSONDecodeError:
+                    # 尝试在answer中查找代码块
+                    code_block_pattern = r'```(?:\w+)?\s*(.*?)\s*```'
+                    code_blocks = re.findall(code_block_pattern, match, re.DOTALL)
+                    for block in code_blocks:
+                        try:
+                            data = json.loads(block)
+                            if isinstance(data, list):
+                                for item in data:
+                                    if isinstance(item, dict) and "bbox_2d" in item and "label" in item:
+                                        bbox_data.append(item)
+                            elif isinstance(data, dict) and "bbox_2d" in data and "label" in data:
+                                bbox_data.append(data)
+                            break  # 找到第一个有效的代码块就停止
+                        except json.JSONDecodeError:
+                            continue
+                    if bbox_data:
+                        break
+        
+        # 方法4: 尝试提取Qwen3-VL-Thinking格式的答案
+        if not bbox_data:
+            pattern = r'bbox2d\s+([^\s$]+?)\s*$(.*?)$'
+            matches = re.findall(pattern, assistant_content)
+            for label, coords_str in matches:
+                try:
+                    coords = json.loads(f"[{coords_str}]")
+                    if len(coords) == 4:
+                        bbox_data.append({
+                            "label": label,
+                            "bbox_2d": coords
+                        })
+                except json.JSONDecodeError:
+                    # 尝试手动解析坐标
+                    coord_pattern = r'(\d+(?:\.\d+)?)'
+                    coord_matches = re.findall(coord_pattern, coords_str)
+                    if len(coord_matches) == 4:
+                        coords = [float(c) for c in coord_matches]
+                        bbox_data.append({
+                            "label": label,
+                            "bbox_2d": coords
+                        })
+        
+        return bbox_data
+            
     def run_all_images(self):
         """Run all images with the same prompt for batch processing"""
         if len(self.parent().image_list) <= 0:
@@ -1411,7 +2162,7 @@ class ChatbotDialog(QDialog):
 
     def process_next_image(self, progress_dialog, prompt):
         total_images = len(self.parent().image_list)
-
+        logger.info(f"====Processing image==== {self.image_index + 1}/{total_images}")
         if (self.image_index < total_images) and (not self.cancel_processing):
             template = self.tr("Processing image %d/%d...")
             display_text = template % (self.image_index + 1, total_images)
@@ -1460,7 +2211,17 @@ class ChatbotDialog(QDialog):
                 max_tokens=max_tokens,
                 stream=False,
             )
-            content = response.choices[0].message.content
+            
+            logger.info(f"Response from model: {response}")  # 添加日志
+                    
+            # 添加检查以防止索引越界
+            if not response.choices or len(response.choices) == 0:
+                logger.error("No choices returned from model response")
+                content = ""
+            else:
+                content = response.choices[0].message.content
+                logger.info(f"Assistant content: {content}")  # 添加日志
+
 
             self.parent().other_data["chat_history"] = [
                 {
@@ -1471,7 +2232,18 @@ class ChatbotDialog(QDialog):
                 {"role": "assistant", "content": content, "image": None},
             ]
             self.parent().set_dirty()
-
+            logger.info(f"Line1716，save parent dirty for {self.parent().filename}")
+            # Save chat history with "chatbot_" prefix for each image during batch processing
+            self.save_chat_history_with_prefix()
+            logger.info(f"Line1719，save chat with prefix ====")
+            # Generate VLM-R1-OVD format file automatically
+            self.generate_vlm_r1_ovd_from_chat_history(
+                {"chat_history": self.parent().other_data["chat_history"]},
+                osp.splitext(osp.basename(self.parent().filename))[0]
+            )
+            
+            # 移除对不存在方法的调用
+            # self.generate_xlabel_from_chat_history(...)  # 这个方法不存在
             progress_dialog.setValue(self.image_index + 1)
             self.image_index += 1
             self.navigate_image()
@@ -1496,6 +2268,10 @@ class ChatbotDialog(QDialog):
         del self.image_index
         del self.current_index
         progress_dialog.close()
+        
+        # Save chatbot history with prefix after batch processing
+        self.save_chat_history_with_prefix()
+        
 
     def import_export_dataset(self):
         """Import/Export the dataset"""
@@ -1740,9 +2516,9 @@ class ChatbotDialog(QDialog):
                         if not found_image:
                             continue
 
-                        json_filename = (
-                            os.path.splitext(image_filename)[0] + ".json"
-                        )
+                        # Add "chatbot_" prefix to the JSON filename
+                        base_filename = os.path.splitext(image_filename)[0]
+                        json_filename = f"chatbot_{base_filename}.json"
                         json_path = os.path.join(current_dir, json_filename)
 
                         # Prepare chat history
